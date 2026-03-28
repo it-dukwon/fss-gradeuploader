@@ -1,0 +1,10 @@
+.env
+venv/
+downloads/
+logs/
+uploads/
+__pycache__/
+*.pyc
+node_modules/
+ekape_download.log
+upload-api/

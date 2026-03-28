@@ -1,0 +1,54 @@
+name: Daily Grade Upload
+
+on:
+  schedule:
+    # UTC 기준 - 한국시간 08:00 = UTC 23:00 (전날)
+    - cron: '0 23 * * *'
+  workflow_dispatch:  # 수동 실행 가능
+
+jobs:
+  download-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Create .env file from secrets
+        run: |
+          echo "EKAPE_ID=$EKAPE_ID" >> .env
+          echo "EKAPE_PW=$EKAPE_PW" >> .env
+          echo "AZURE_STORAGE_CONNECTION_STRING=$AZURE_CONN" >> .env
+          echo "AZURE_STORAGE_CONTAINER=$AZURE_CONTAINER" >> .env
+          echo "DOWNLOAD_DIR=./downloads" >> .env
+          echo "LOG_LEVEL=INFO" >> .env
+        env:
+          EKAPE_ID: ${{ secrets.EKAPE_ID }}
+          EKAPE_PW: ${{ secrets.EKAPE_PW }}
+          AZURE_CONN: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+          AZURE_CONTAINER: ${{ secrets.AZURE_STORAGE_CONTAINER }}
+
+      - name: Run grade download and upload
+        run: python main.py
+
+      - name: Upload logs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 7

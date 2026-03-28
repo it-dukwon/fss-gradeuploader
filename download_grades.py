@@ -362,11 +362,9 @@ def run_download():
     logger.info(f"다운로드 경로: {download_path}")
 
     with sync_playwright() as p:
-        # GitHub Actions 등 CI 환경에서는 headless, 로컬에서는 GUI
-        is_ci = os.getenv("CI", "false").lower() == "true"
         browser = p.chromium.launch(
-            headless=is_ci,
-            args=["--start-maximized"] if not is_ci else [],
+            headless=False,
+            args=["--start-maximized"],
         )
         context = browser.new_context(
             viewport={"width": 1920, "height": 1080},

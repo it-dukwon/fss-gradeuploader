@@ -33,11 +33,15 @@ DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")
 NEXACRO_ID_INPUT = 'input[id$="edtUserId:input"]'
 NEXACRO_PW_INPUT = 'input[id$="edtPswrd:input"]'
 NEXACRO_LOGIN_BTN = 'div[id$="btnLogin"]'
-NEXACRO_TRADE_TAB = 'div[id$="btnLoginType01"]'  # 거래증명통합
+NEXACRO_TRADE_TAB = 'div[id$="btnLoginType01"]'
 
 
-def get_yesterday_str():
-    """어제 날짜를 YYYY-MM-DD 형식으로 반환"""
+def get_target_date_str():
+    """대상 날짜를 반환 (TARGET_DATE 환경변수 우선, 없으면 어제)"""
+    target = os.getenv("TARGET_DATE", "").strip()
+    if target:
+        logger.info(f"TARGET_DATE 환경변수 사용: {target}")
+        return target
     yesterday = datetime.now() - timedelta(days=1)
     return yesterday.strftime("%Y-%m-%d")
 
@@ -53,9 +57,7 @@ def ensure_download_dir():
 def dismiss_all_popups(page):
     """Nexacro 팝업/모달을 닫기 (DOM 삭제 없이 안전하게)"""
     logger.info("팝업 닫기 시도 중...")
-
     for attempt in range(3):
-        # 방법 1: "닫기" 버튼을 force=True로 클릭
         try:
             close_btns = page.get_by_text("닫기").all()
             for btn in close_btns:
@@ -67,15 +69,11 @@ def dismiss_all_popups(page):
                     pass
         except Exception:
             pass
-
-        # 방법 2: Escape 키
         try:
             page.keyboard.press("Escape")
             time.sleep(1)
         except Exception:
             pass
-
-        # 방법 3: nexamodaloverlay만 숨기기 (삭제하지 않음)
         try:
             page.evaluate("""() => {
                 document.querySelectorAll('.nexamodaloverlay').forEach(el => {
@@ -84,19 +82,15 @@ def dismiss_all_popups(page):
             }""")
         except Exception:
             pass
-
     time.sleep(1)
 
 
 def login_ekape(page):
     """축산물원패스 로그인 (거래증명통합) - fastLogin.jsp 사용"""
     logger.info("축산물원패스 로그인 시작...")
-
-    # fastLogin.jsp 페이지로 이동
     page.goto(EKAPE_LOGIN_URL, wait_until="networkidle", timeout=60000)
     time.sleep(3)
 
-    # 이미 로그인 되어 있는지 확인
     try:
         logout_btn = page.get_by_text("로그아웃")
         if logout_btn.is_visible(timeout=3000):
@@ -105,7 +99,6 @@ def login_ekape(page):
     except Exception:
         pass
 
-    # 거래증명통합 탭 클릭
     try:
         trade_tab = page.locator(NEXACRO_TRADE_TAB).first
         if trade_tab.is_visible(timeout=3000):
@@ -115,7 +108,6 @@ def login_ekape(page):
     except Exception:
         logger.info("거래증명통합 탭이 이미 선택되어 있거나 찾을 수 없음")
 
-    # 아이디 입력
     try:
         id_input = page.locator(NEXACRO_ID_INPUT)
         id_input.wait_for(state="visible", timeout=10000)
@@ -126,7 +118,6 @@ def login_ekape(page):
         logger.error(f"아이디 입력 실패: {e}")
         return False
 
-    # 비밀번호 입력
     try:
         pw_input = page.locator(NEXACRO_PW_INPUT)
         pw_input.wait_for(state="visible", timeout=5000)
@@ -139,7 +130,6 @@ def login_ekape(page):
 
     time.sleep(1)
 
-    # 로그인 버튼 클릭
     try:
         login_btn = page.locator(NEXACRO_LOGIN_BTN).first
         login_btn.click()
@@ -148,10 +138,8 @@ def login_ekape(page):
         logger.error(f"로그인 버튼 클릭 실패: {e}")
         return False
 
-    # 로그인 후 메인 페이지 로딩 대기
     time.sleep(10)
 
-    # 로그인 성공 확인
     for attempt in range(3):
         try:
             logout_btn = page.get_by_text("로그아웃")
@@ -189,7 +177,6 @@ def navigate_to_pig_delegation(page):
     """돼지도체위임현황 메뉴로 이동"""
     logger.info("돼지도체위임현황 메뉴로 이동 중...")
 
-    # 등급판정결과 메뉴 클릭
     try:
         menu = page.get_by_text("등급판정결과", exact=True).first
         menu.click()
@@ -199,7 +186,6 @@ def navigate_to_pig_delegation(page):
         logger.error(f"등급판정결과 메뉴 클릭 실패: {e}")
         return False
 
-    # 돼지도체위임현황 서브메뉴 클릭
     try:
         submenu = page.get_by_text("돼지도체위임현황", exact=True).first
         submenu.click()
@@ -209,9 +195,7 @@ def navigate_to_pig_delegation(page):
         logger.error(f"돼지도체위임현황 서브메뉴 클릭 실패: {e}")
         return False
 
-    # 팝업/모달 제거
     dismiss_all_popups(page)
-
     return True
 
 
@@ -219,14 +203,9 @@ def set_date_and_search(page, target_date):
     """판정기간을 어제 날짜로 설정하고 조회 (정확한 Nexacro 셀렉터 사용)"""
     logger.info(f"판정기간을 {target_date}로 설정 중...")
 
-    # 혹시 남은 팝업 한번 더 정리
     dismiss_all_popups(page)
     time.sleep(1)
 
-    # 돼지도체위임현황 탭의 판정기간 날짜 필드만 정확히 타겟팅
-    # - divCalFromTo.form.calFrom = 판정기간 시작일
-    # - divCalFromTo.form.calTo = 판정기간 종료일
-    # (다른 탭의 dt.form.calFrom/calTo 와 구분)
     date_selectors = [
         ('시작일', 'input[id*="divCalFromTo"][id*="calFrom"][id$=":input"]'),
         ('종료일', 'input[id*="divCalFromTo"][id*="calTo"][id$=":input"]'),
@@ -242,20 +221,15 @@ def set_date_and_search(page, target_date):
             old_val = inp.input_value()
             logger.info(f"  판정기간 {label} 현재값: {old_val}")
 
-            # 1. force 클릭으로 포커스
             inp.click(force=True)
             time.sleep(0.3)
-            # 2. Ctrl+A로 전체 선택
             page.keyboard.press("Control+a")
             time.sleep(0.2)
-            # 3. 새 날짜 타이핑
             page.keyboard.type(target_date, delay=50)
             time.sleep(0.3)
-            # 4. Tab으로 포커스 이동 (Nexacro 값 확정)
             page.keyboard.press("Tab")
             time.sleep(0.5)
 
-            # 5. 값 변경 확인
             new_val = inp.input_value()
             if new_val == target_date:
                 logger.info(f"  판정기간 {label} 설정 완료: {old_val} -> {new_val}")
@@ -266,11 +240,9 @@ def set_date_and_search(page, target_date):
 
     time.sleep(1)
 
-    # 조회 버튼 클릭 - 돼지도체위임현황 탭의 조회 버튼만 정확히 타겟팅
     try:
         search_btn = page.query_selector('div[id*="tabFar"][id*="btnSearch"]')
         if not search_btn:
-            # 폴백: 텍스트로 찾기
             search_btn = page.get_by_text("조회", exact=True).first
         search_btn.click(force=True)
         time.sleep(7)
@@ -286,21 +258,15 @@ def download_all_grade_results(page, download_path):
     """모든 행의 등급판정결과를 다운로드 (cell_X_12 = 등급판정결과, cell_X_13 = 기계판정)"""
     logger.info("등급판정결과 다운로드 시작...")
 
-    # 혹시 남은 팝업 정리
     dismiss_all_popups(page)
 
     downloaded_files = []
 
-    # 그리드에서 등급판정결과 다운로드 버튼만 정확히 타겟팅
-    # grdMndtMngmCowList 그리드의 body에서:
-    #   cell_X_12.cellbutton = 등급판정결과 다운로드 (원하는 것)
-    #   cell_X_13.cellbutton = 등급판정결과[기계판정] 다운로드 (제외)
     grade_buttons = page.query_selector_all(
         'div[id*="grdMndtMngmCowList.body"][id$="_12.cellbutton"]'
     )
     logger.info(f"등급판정결과 다운로드 버튼(cell_X_12) {len(grade_buttons)}개 발견")
 
-    # 보이는 버튼만 필터링
     visible_buttons = []
     for btn in grade_buttons:
         try:
@@ -320,11 +286,9 @@ def download_all_grade_results(page, download_path):
         try:
             logger.info(f"  [{idx + 1}/{len(visible_buttons)}] 다운로드 중...")
 
-            # 버튼이 보이도록 스크롤
             btn.scroll_into_view_if_needed()
             time.sleep(0.5)
 
-            # 다운로드 이벤트 대기하면서 클릭 (force=True)
             with page.expect_download(timeout=30000) as download_info:
                 btn.click(force=True)
 
@@ -332,7 +296,6 @@ def download_all_grade_results(page, download_path):
             filename = download.suggested_filename or f"grade_result_{idx + 1}.xls"
             save_path = os.path.join(download_path, filename)
 
-            # 중복 파일명 처리
             base, ext = os.path.splitext(save_path)
             counter = 1
             while os.path.exists(save_path):
@@ -356,15 +319,16 @@ def download_all_grade_results(page, download_path):
 
 def run_download():
     """메인 다운로드 실행 함수"""
-    yesterday = get_yesterday_str()
+    yesterday = get_target_date_str()
     download_path = ensure_download_dir()
     logger.info(f"=== 등급판정결과 다운로드 시작 (대상 날짜: {yesterday}) ===")
     logger.info(f"다운로드 경로: {download_path}")
 
     with sync_playwright() as p:
+        is_ci = os.getenv("CI", "false").lower() == "true"
         browser = p.chromium.launch(
-            headless=False,
-            args=["--start-maximized"],
+            headless=is_ci,
+            args=["--start-maximized"] if not is_ci else [],
         )
         context = browser.new_context(
             viewport={"width": 1920, "height": 1080},
@@ -373,24 +337,19 @@ def run_download():
         page = context.new_page()
 
         try:
-            # 1. 로그인
             if not login_ekape(page):
                 logger.error("로그인 실패! 프로세스를 종료합니다.")
                 return []
 
-            # 2. 돼지도체위임현황 메뉴 이동
             if not navigate_to_pig_delegation(page):
                 logger.error("메뉴 이동 실패! 프로세스를 종료합니다.")
                 return []
 
-            # 3. 날짜 설정 및 조회
             if not set_date_and_search(page, yesterday):
                 logger.error("조회 실패! 프로세스를 종료합니다.")
                 return []
 
-            # 4. 등급판정결과 다운로드
             downloaded = download_all_grade_results(page, download_path)
-
             return downloaded
 
         except Exception as e:
@@ -405,7 +364,6 @@ def run_download():
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
-
     load_dotenv()
 
     downloaded_files = run_download()

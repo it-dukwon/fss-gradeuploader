@@ -31,13 +31,15 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 
 
-def report_log(target_date, status, download_count, upload_count, error_message, started_at, finished_at):
-    """fss-webapp API에 실행 로그를 전송"""
-    api_url = os.getenv("FSS_WEBAPP_API_URL", "").rstrip("/")
-    if not api_url:
-        logger.warning("FSS_WEBAPP_API_URL이 설정되지 않아 로그 전송을 건너뜁니다.")
-        return
+API_TARGETS = [
+    ("FSS_WEBAPP_API_URL", "FSS_WEBAPP_API_KEY"),           # public (기존)
+    ("FSS_WEBAPP_API_URL_DEV", "FSS_WEBAPP_API_KEY_DEV"),   # dev
+    ("FSS_WEBAPP_API_URL_PRD", "FSS_WEBAPP_API_KEY_PRD"),   # prd
+]
 
+
+def report_log(target_date, status, download_count, upload_count, error_message, started_at, finished_at):
+    """fss-webapp API에 실행 로그를 전송 (설정된 모든 환경으로)"""
     payload = {
         "job_name": "fss-gradeuploader",
         "target_date": target_date,
@@ -49,17 +51,27 @@ def report_log(target_date, status, download_count, upload_count, error_message,
         "finished_at": finished_at.isoformat(),
     }
 
-    headers = {}
-    api_key = os.getenv("FSS_WEBAPP_API_KEY", "")
-    if api_key:
-        headers["x-api-key"] = api_key
+    sent = False
+    for url_env, key_env in API_TARGETS:
+        api_url = os.getenv(url_env, "").rstrip("/")
+        if not api_url:
+            continue
 
-    try:
-        resp = requests.post(f"{api_url}/api/grade-upload-logs", json=payload, headers=headers, timeout=10)
-        resp.raise_for_status()
-        logger.info(f"로그 전송 완료: {resp.json()}")
-    except Exception as e:
-        logger.warning(f"로그 전송 실패 (메인 작업에는 영향 없음): {e}")
+        headers = {}
+        api_key = os.getenv(key_env, "")
+        if api_key:
+            headers["x-api-key"] = api_key
+
+        try:
+            resp = requests.post(f"{api_url}/api/grade-upload-logs", json=payload, headers=headers, timeout=10)
+            resp.raise_for_status()
+            logger.info(f"로그 전송 완료 [{url_env}]: {resp.json()}")
+            sent = True
+        except Exception as e:
+            logger.warning(f"로그 전송 실패 [{url_env}] (메인 작업에는 영향 없음): {e}")
+
+    if not sent:
+        logger.warning("설정된 API URL이 없어 로그 전송을 건너뜁니다.")
 
 
 def main():

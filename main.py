@@ -49,8 +49,13 @@ def report_log(target_date, status, download_count, upload_count, error_message,
         "finished_at": finished_at.isoformat(),
     }
 
+    headers = {}
+    api_key = os.getenv("FSS_WEBAPP_API_KEY", "")
+    if api_key:
+        headers["x-api-key"] = api_key
+
     try:
-        resp = requests.post(f"{api_url}/api/grade-upload-logs", json=payload, timeout=10)
+        resp = requests.post(f"{api_url}/api/grade-upload-logs", json=payload, headers=headers, timeout=10)
         resp.raise_for_status()
         logger.info(f"로그 전송 완료: {resp.json()}")
     except Exception as e:

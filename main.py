@@ -93,9 +93,6 @@ def main():
 
     if not downloaded_files:
         logger.warning("다운로드된 파일이 없습니다. 업로드를 건너뜁니다.")
-        if status != "fail":
-            status = "fail"
-            error_message = "다운로드된 파일 없음"
         finished_at = datetime.now(KST)
         report_log(target_date, status, download_count, upload_count, error_message, started_at, finished_at)
         return

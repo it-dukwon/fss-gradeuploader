@@ -31,15 +31,16 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 
 
-API_TARGETS = [
-    ("FSS_WEBAPP_API_URL", "FSS_WEBAPP_API_KEY"),           # public (기존)
-    ("FSS_WEBAPP_API_URL_DEV", "FSS_WEBAPP_API_KEY_DEV"),   # dev
-    ("FSS_WEBAPP_API_URL_PRD", "FSS_WEBAPP_API_KEY_PRD"),   # prd
-]
-
-
 def report_log(target_date, status, download_count, upload_count, error_message, started_at, finished_at):
-    """fss-webapp API에 실행 로그를 전송 (설정된 모든 환경으로)"""
+    """fss-webapp /api/grade-upload-logs 에 실행 로그 전송."""
+    api_url = os.getenv("FSS_WEBAPP_API_URL", "").rstrip("/")
+    if not api_url:
+        logger.warning("FSS_WEBAPP_API_URL 미설정 — 로그 전송 skip")
+        return
+
+    api_key = os.getenv("FSS_WEBAPP_API_KEY", "").strip()
+    headers = {"x-api-key": api_key} if api_key else {}
+
     payload = {
         "job_name": "fss-gradeuploader",
         "target_date": target_date,
@@ -51,27 +52,49 @@ def report_log(target_date, status, download_count, upload_count, error_message,
         "finished_at": finished_at.isoformat(),
     }
 
-    sent = False
-    for url_env, key_env in API_TARGETS:
-        api_url = os.getenv(url_env, "").rstrip("/")
-        if not api_url:
-            continue
+    try:
+        resp = requests.post(f"{api_url}/api/grade-upload-logs", json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+        logger.info(f"로그 전송 완료: {resp.json()}")
+    except Exception as e:
+        logger.warning(f"로그 전송 실패 (메인 작업 영향 없음): {e}")
 
-        headers = {}
-        api_key = os.getenv(key_env, "")
-        if api_key:
-            headers["x-api-key"] = api_key
 
-        try:
-            resp = requests.post(f"{api_url}/api/grade-upload-logs", json=payload, headers=headers, timeout=10)
-            resp.raise_for_status()
-            logger.info(f"로그 전송 완료 [{url_env}]: {resp.json()}")
-            sent = True
-        except Exception as e:
-            logger.warning(f"로그 전송 실패 [{url_env}] (메인 작업에는 영향 없음): {e}")
+def notify_failure(target_date, error_message, started_at, finished_at, download_count, upload_count):
+    """status=fail 시 fss-webapp /api/alerts/fire 호출 → 메일/디바운스는 webapp 책임.
 
-    if not sent:
-        logger.warning("설정된 API URL이 없어 로그 전송을 건너뜁니다.")
+    호출 실패는 swallow (메인 잡 영향 없음).
+    """
+    url = os.getenv("FSSWEBAPP_ALERTS_URL", "").strip()
+    if not url:
+        logger.warning("FSSWEBAPP_ALERTS_URL 미설정 — 알람 호출 skip")
+        return
+
+    key = os.getenv("FSSWEBAPP_ALERTS_KEY", "").strip()
+    headers = {"x-api-key": key} if key else {}
+
+    payload = {
+        "alert_code": "grade_upload_failed",
+        "severity": "error",
+        "source": "fss-gradeuploader",
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "payload": {
+            "job_name": "ekape-daily-crawl",
+            "target_date": target_date,
+            "error_message": (str(error_message)[:500] if error_message else ""),
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "download_count": download_count,
+            "upload_count": upload_count,
+        },
+    }
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+        logger.info(f"[alerts] 호출 완료: {resp.json()}")
+    except Exception as e:
+        logger.warning(f"[alerts] 호출 실패 (swallow): {e}")
 
 
 def main():
@@ -92,21 +115,39 @@ def main():
 
     # Step 1: Download grade results from ekape
     logger.info("[Step 1] 축산물원패스 등급판정결과 다운로드")
+    downloaded_files = []
+    download_status = None
+    download_error = None
     try:
-        from download_grades import run_download, get_target_date_str
+        from download_grades import run_download, get_target_date_str, STATUS_OK, STATUS_NO_DATA
         target_date = get_target_date_str()
-        downloaded_files = run_download()
+        result = run_download()
+        downloaded_files = result["files"]
+        download_status = result["status"]
+        download_error = result["error"]
         download_count = len(downloaded_files)
     except Exception as e:
         logger.error(f"다운로드 중 오류: {e}")
-        downloaded_files = []
         status = "fail"
         error_message = str(e)
 
+    # 다운로드 단계 결과로 status 결정
+    # - STATUS_OK: 파일 있음 → 업로드 진행
+    # - STATUS_NO_DATA: 조회 결과 0건 → 정상 (success)로 기록하고 종료
+    # - 그 외 (login_failed, config_missing, nav_failed, search_failed, error): 실패로 기록하고 종료
+    if download_status and download_status not in (STATUS_OK, STATUS_NO_DATA):
+        status = "fail"
+        error_message = download_error or f"다운로드 실패 ({download_status})"
+
     if not downloaded_files:
-        logger.warning("다운로드된 파일이 없습니다. 업로드를 건너뜁니다.")
+        if download_status == STATUS_NO_DATA:
+            logger.info("조회 결과가 0건입니다. 정상 종료합니다.")
+        else:
+            logger.warning(f"다운로드된 파일이 없습니다. (status={download_status}) 업로드를 건너뜁니다.")
         finished_at = datetime.now(KST)
         report_log(target_date, status, download_count, upload_count, error_message, started_at, finished_at)
+        if status == "fail":
+            notify_failure(target_date, error_message, started_at, finished_at, download_count, upload_count)
         return
 
     logger.info(f"다운로드 완료: {len(downloaded_files)}개 파일")
@@ -141,6 +182,8 @@ def main():
 
     finished_at = datetime.now(KST)
     report_log(target_date, status, download_count, upload_count, error_message, started_at, finished_at)
+    if status == "fail":
+        notify_failure(target_date, error_message, started_at, finished_at, download_count, upload_count)
 
 
 if __name__ == "__main__":

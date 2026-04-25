@@ -25,9 +25,16 @@ logger = logging.getLogger(__name__)
 # ===== 설정 =====
 EKAPE_LOGIN_URL = "https://www.ekape.or.kr/kapecp/ui/kapecp/fastLogin.jsp"
 EKAPE_MAIN_URL = "https://www.ekape.or.kr/kapecp/ui/kapecp/index.html"
-EKAPE_ID = os.getenv("EKAPE_ID", "dukwon2")
-EKAPE_PW = os.getenv("EKAPE_PW", "dukwon2572*")
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")
+
+# 다운로드 결과 상태 코드
+STATUS_OK = "ok"                  # 정상 다운로드
+STATUS_NO_DATA = "no_data"        # 조회 결과가 0건 (정상 케이스)
+STATUS_CONFIG_MISSING = "config_missing"  # 계정정보 누락
+STATUS_LOGIN_FAILED = "login_failed"      # 로그인 실패
+STATUS_NAV_FAILED = "nav_failed"          # 메뉴 이동 실패
+STATUS_SEARCH_FAILED = "search_failed"    # 조회 실패
+STATUS_ERROR = "error"                    # 기타 예외
 
 # Nexacro 요소 ID (끝 부분으로 매칭)
 NEXACRO_ID_INPUT = 'input[id$="edtUserId:input"]'
@@ -85,7 +92,45 @@ def dismiss_all_popups(page):
     time.sleep(1)
 
 
-def login_ekape(page):
+def resolve_ekape_credentials():
+    """축산물원패스 계정정보 조회.
+
+    우선순위:
+        1. KEY_VAULT_URL 설정 시 → Azure Key Vault에서 조회 (Managed Identity 인증)
+        2. 그 외 → EKAPE_ID / EKAPE_PW 환경변수
+
+    Returns:
+        (ekape_id, ekape_pw, error_message)
+    """
+    vault_url = os.getenv("KEY_VAULT_URL", "").strip()
+    if vault_url:
+        try:
+            from azure.identity import DefaultAzureCredential
+            from azure.keyvault.secrets import SecretClient
+
+            id_secret = os.getenv("EKAPE_ID_SECRET_NAME", "EKAPE-ID")
+            pw_secret = os.getenv("EKAPE_PW_SECRET_NAME", "EKAPE-PW")
+
+            client = SecretClient(vault_url=vault_url, credential=DefaultAzureCredential())
+            ekape_id = client.get_secret(id_secret).value
+            ekape_pw = client.get_secret(pw_secret).value
+            logger.info(f"계정정보 로드: Key Vault ({vault_url}, {id_secret}/{pw_secret})")
+            return ekape_id, ekape_pw, None
+        except Exception as e:
+            err = f"Key Vault에서 계정정보 조회 실패: {e}"
+            logger.error(err)
+            return None, None, err
+
+    ekape_id = os.getenv("EKAPE_ID", "").strip()
+    ekape_pw = os.getenv("EKAPE_PW", "").strip()
+    if ekape_id and ekape_pw:
+        logger.info("계정정보 로드: 환경변수 (.env)")
+        return ekape_id, ekape_pw, None
+
+    return None, None, "EKAPE_ID/EKAPE_PW 환경변수가 없고 KEY_VAULT_URL도 설정되지 않았습니다."
+
+
+def login_ekape(page, ekape_id, ekape_pw):
     """축산물원패스 로그인 (거래증명통합) - fastLogin.jsp 사용"""
     logger.info("축산물원패스 로그인 시작...")
     page.goto(EKAPE_LOGIN_URL, wait_until="networkidle", timeout=60000)
@@ -112,7 +157,7 @@ def login_ekape(page):
         id_input = page.locator(NEXACRO_ID_INPUT)
         id_input.wait_for(state="visible", timeout=10000)
         id_input.click()
-        id_input.fill(EKAPE_ID)
+        id_input.fill(ekape_id)
         logger.info("아이디 입력 완료")
     except Exception as e:
         logger.error(f"아이디 입력 실패: {e}")
@@ -122,7 +167,7 @@ def login_ekape(page):
         pw_input = page.locator(NEXACRO_PW_INPUT)
         pw_input.wait_for(state="visible", timeout=5000)
         pw_input.click()
-        pw_input.fill(EKAPE_PW)
+        pw_input.fill(ekape_pw)
         logger.info("비밀번호 입력 완료")
     except Exception as e:
         logger.error(f"비밀번호 입력 실패: {e}")
@@ -318,7 +363,15 @@ def download_all_grade_results(page, download_path):
 
 
 def run_download():
-    """메인 다운로드 실행 함수"""
+    """메인 다운로드 실행 함수
+
+    Returns:
+        dict: {"files": [...], "status": STATUS_*, "error": str | None}
+    """
+    ekape_id, ekape_pw, cred_err = resolve_ekape_credentials()
+    if cred_err:
+        return {"files": [], "status": STATUS_CONFIG_MISSING, "error": cred_err}
+
     yesterday = get_target_date_str()
     download_path = ensure_download_dir()
     logger.info(f"=== 등급판정결과 다운로드 시작 (대상 날짜: {yesterday}) ===")
@@ -337,25 +390,29 @@ def run_download():
         page = context.new_page()
 
         try:
-            if not login_ekape(page):
+            if not login_ekape(page, ekape_id, ekape_pw):
                 logger.error("로그인 실패! 프로세스를 종료합니다.")
-                return []
+                return {"files": [], "status": STATUS_LOGIN_FAILED, "error": "축산물원패스 로그인 실패"}
 
             if not navigate_to_pig_delegation(page):
                 logger.error("메뉴 이동 실패! 프로세스를 종료합니다.")
-                return []
+                return {"files": [], "status": STATUS_NAV_FAILED, "error": "돼지도체위임현황 메뉴 이동 실패"}
 
             if not set_date_and_search(page, yesterday):
                 logger.error("조회 실패! 프로세스를 종료합니다.")
-                return []
+                return {"files": [], "status": STATUS_SEARCH_FAILED, "error": "판정기간 조회 실패"}
 
             downloaded = download_all_grade_results(page, download_path)
-            return downloaded
+            status = STATUS_OK if downloaded else STATUS_NO_DATA
+            return {"files": downloaded, "status": status, "error": None}
 
         except Exception as e:
             logger.error(f"예상치 못한 오류: {e}")
-            page.screenshot(path=os.path.join(download_path, "error_screenshot.png"))
-            return []
+            try:
+                page.screenshot(path=os.path.join(download_path, "error_screenshot.png"))
+            except Exception:
+                pass
+            return {"files": [], "status": STATUS_ERROR, "error": str(e)}
 
         finally:
             browser.close()
@@ -366,11 +423,12 @@ if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()
 
-    downloaded_files = run_download()
+    result = run_download()
+    downloaded_files = result["files"]
 
     if downloaded_files:
         logger.info(f"\n=== 다운로드 완료 ===")
         for f in downloaded_files:
             logger.info(f"  - {f}")
     else:
-        logger.warning("다운로드된 파일이 없습니다.")
+        logger.warning(f"다운로드된 파일이 없습니다. (status={result['status']}, error={result['error']})")

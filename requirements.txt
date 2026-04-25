@@ -1,4 +1,6 @@
 playwright
 python-dotenv
 azure-storage-file-datalake
+azure-identity
+azure-keyvault-secrets
 requests

@@ -57,76 +57,115 @@ python3 main.py
 - `FSSWEBAPP_ALERTS_URL`
 - `FSSWEBAPP_ALERTS_KEY`
 
-### 1.2. 로컬 `.env` → VM 으로 복사 (Azure Bastion)
+### 1.2. 로컬 `.env` → VM 으로 반영 (Azure Bastion)
 
-**원칙**: `.env`의 정본은 **개발자 로컬 머신**(이 레포의 `.env`). VM에는 **그 파일을 그대로 덮어쓰기** 한다. 키 값을 VM에서 직접 손으로 편집하지 말 것 (오타/누락 위험).
+**정본은 로컬 레포 `.env`**. VM에서 손으로 편집하지 말고, 아래 방법 중 택1로 통째 덮어쓰기.
 
-VM은 외부 SSH가 차단되어 있으므로 **Azure Bastion 경유**로 파일 전송. 두 가지 방법 중 택1.
+> 어느 방법이든 시작 전 VM에서 백업 한 줄:
+> `cp ~/fss-gradeuploader/.env ~/fss-gradeuploader/.env.bak.$(date +%Y%m%d) 2>/dev/null`
 
-#### 방법 A. `az network bastion tunnel` + `scp` (권장, 스크립트화 가능)
+> **Bastion 클립보드 패널에 대해**: 브라우저가 클립보드 권한을 허용한 상태(처음 연결할 때 한 번 허용)면 패널 자체는 무시해도 됨. 로컬 `Ctrl+C` → Bastion 터미널 우클릭(또는 `Ctrl+Shift+V`)으로 바로 paste 가능. 패널은 권한이 막힌 환경의 fallback / 클립보드 내용 가시화 용도.
 
-전제: 로컬 머신에 [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) 설치 + `az login` 완료. OpenSSH 클라이언트(scp/ssh) — Windows 10/11, macOS, Linux 기본 포함.
+#### 방법 A. 복붙 (가장 간단, 1회성)
 
-```bash
-# 1) 운영 식별자 (한 번만 채워두면 재사용)
-RG="<리소스 그룹 이름>"            # 예: rg-fss-prd
-BASTION="<bastion 이름>"             # 예: bastion-fss
-VM_NAME="fss-gradeuploader"
-SSH_USER="dnftksdodi"
-
-# 2) VM resource ID 조회
-VM_ID=$(az vm show -g "$RG" -n "$VM_NAME" --query id -o tsv)
-
-# 3) Bastion 터널 열기 (이 터미널은 작업 동안 켜둠 — Ctrl+C 로 종료)
-az network bastion tunnel \
-  --name "$BASTION" \
-  --resource-group "$RG" \
-  --target-resource-id "$VM_ID" \
-  --resource-port 22 \
-  --port 50022
-```
-
-위 터미널은 그대로 두고 **별도 터미널**에서:
-
-```bash
-# 4) VM 측 .env 백업
-ssh -p 50022 "$SSH_USER@127.0.0.1" \
-  "cp ~/fss-gradeuploader/.env ~/fss-gradeuploader/.env.bak.\$(date +%Y%m%d) 2>/dev/null || true"
-
-# 5) 로컬 .env → VM .env 덮어쓰기 (이 명령은 레포 루트에서 실행)
-scp -P 50022 ./.env "$SSH_USER@127.0.0.1:~/fss-gradeuploader/.env"
-
-# 6) 권한 정리 (선택, 600 으로)
-ssh -p 50022 "$SSH_USER@127.0.0.1" "chmod 600 ~/fss-gradeuploader/.env"
-```
-
-> **첫 접속 시 host key 경고**가 뜨면 (`127.0.0.1`은 매 터널마다 키가 다르게 보일 수 있음): `~/.ssh/known_hosts`에서 `[127.0.0.1]:50022` 항목 삭제 후 재시도하거나, `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null` 옵션 추가.
-
-#### 방법 B. Azure Portal Bastion 브라우저 업로드 (Standard SKU 이상)
-
-1. Portal → 가상 머신 → `fss-gradeuploader` → **Bastion** → 연결
-2. 인증 (SSH 키 또는 비밀번호) 후 브라우저 SSH 세션 진입
-3. 우측 상단 **파일 업로드** 아이콘 → 로컬 `.env` 선택 → 홈 디렉토리에 업로드됨
-4. 세션 안에서:
+1. 로컬에서 `.env` 열어 **전체 복사** (`Ctrl+A` → `Ctrl+C`)
+2. Portal → VM → **Bastion 연결** (브라우저 SSH)
+3. 터미널에서:
    ```bash
-   cp ~/fss-gradeuploader/.env ~/fss-gradeuploader/.env.bak.$(date +%Y%m%d)
-   mv ~/.env ~/fss-gradeuploader/.env
+   cat > ~/fss-gradeuploader/.env <<'EOF'
+   ```
+   Enter 직후 빈 줄에서 **우클릭(또는 `Ctrl+Shift+V`)으로 paste** → 마지막 줄에 `EOF` 한 줄 → Enter
+4. 권한 정리:
+   ```bash
    chmod 600 ~/fss-gradeuploader/.env
    ```
 
-> Bastion **Basic SKU**는 파일 업로드 미지원. 그 경우 방법 A 사용.
+> `<<'EOF'`의 **따옴표** 중요 — 본문의 `$` 변수 확장 안 됨.
+
+#### 방법 A-1. 한글 깨질 때 (base64 우회)
+
+`.env`에 한글 주석이 있으면 클립보드 인코딩 문제로 깨질 수 있음 (PowerShell 5.1의 `Get-Content`가 CP949로 읽거나 Bastion 패널이 UTF-8 손실).
+**base64로 감싸면** 모든 인코딩 우회 가능 (전송되는 건 ASCII만).
+
+로컬 PowerShell:
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\Users\dnftk\DEV\fss-gradeuploader\.env")) | Set-Clipboard
+```
+
+Bastion SSH 터미널:
+```bash
+cat > /tmp/env.b64 <<'B64_EOF'
+```
+→ Enter 후 paste → `B64_EOF` 입력 → Enter
+```bash
+base64 -d /tmp/env.b64 > ~/fss-gradeuploader/.env
+chmod 600 ~/fss-gradeuploader/.env
+rm /tmp/env.b64
+```
+
+#### 방법 B. Bastion 브라우저 파일 업로드 (Standard SKU)
+
+Bastion 연결 패널의 **파일 업로드** → 로컬 `.env` 선택 → SSH 세션에서:
+```bash
+mv ~/.env ~/fss-gradeuploader/.env && chmod 600 ~/fss-gradeuploader/.env
+```
+> Basic SKU는 미지원 — 방법 A 또는 C 사용.
+
+#### 방법 C. `az` 터널 + `scp` (반복 작업/스크립트화)
+
+전제: 로컬에 Azure CLI + `az login`.
+
+```bash
+RG="<리소스 그룹>"  BASTION="<bastion 이름>"  VM_NAME="fss-gradeuploader"  SSH_USER="dnftksdodi"
+VM_ID=$(az vm show -g "$RG" -n "$VM_NAME" --query id -o tsv)
+
+# 터널 (이 터미널 유지, Ctrl+C로 종료)
+az network bastion tunnel --name "$BASTION" --resource-group "$RG" \
+  --target-resource-id "$VM_ID" --resource-port 22 --port 50022
+```
+별도 터미널에서:
+```bash
+scp -P 50022 ./.env "$SSH_USER@127.0.0.1:~/fss-gradeuploader/.env"
+ssh -p 50022 "$SSH_USER@127.0.0.1" "chmod 600 ~/fss-gradeuploader/.env"
+```
+> host key 경고 나면 `~/.ssh/known_hosts`의 `[127.0.0.1]:50022` 줄 삭제 후 재시도.
 
 ### 1.3. 갱신 검증
 
+#### 파일 자체 점검
+
 ```bash
-# 핵심 키 한눈에 확인
+# 1) 전체 내용 (시크릿 노출 주의)
+cat ~/fss-gradeuploader/.env
+
+# 2) 줄 수 / 바이트 수 (로컬 .env 와 비교)
+wc -lc ~/fss-gradeuploader/.env
+
+# 3) 인코딩 / 줄바꿈 확인 — "UTF-8 Unicode text" 만 떠야 정상
+file ~/fss-gradeuploader/.env
+
+# 4) CRLF 섞여 있으면(Windows 줄바꿈) LF 로 정리
+sed -i 's/\r$//' ~/fss-gradeuploader/.env
+
+# 5) 핵심 키 존재 확인 — 5줄 모두 출력되어야 함
 grep -E '^(KEY_VAULT_URL|FSS_WEBAPP_API_URL|FSS_WEBAPP_API_KEY|FSSWEBAPP_ALERTS_URL|FSSWEBAPP_ALERTS_KEY)=' ~/fss-gradeuploader/.env
 
-# 구 키가 남아있지 않은지 확인 (출력 없으면 OK)
+# 6) 구 키 잔존 확인 — 출력 없으면 OK
 grep -E '^(AZURE_KEYVAULT_URL|FSS_WEBAPP_API_URL_(DEV|PRD)|FSS_WEBAPP_API_KEY_(DEV|PRD))' ~/fss-gradeuploader/.env
+```
 
-# 수동 실행으로 KV/webapp 호출 정상 확인
+`file` 결과 해석:
+- ✅ `UTF-8 Unicode text` — 정상
+- ⚠️ `... with CRLF line terminators` — 위 4번 `sed` 한 번 돌리기
+- ❌ `ISO-8859 text` 등 — 인코딩 깨짐, **§1.2 방법 A-1(base64)로 재업로드**
+
+#### 실행 동작 점검
+
+```bash
+# 수동 실행 (KV/webapp 호출까지 한 사이클)
 source venv/bin/activate && python3 main.py
+
+# 최신 run 로그
 tail -100 "$(ls -t ~/fss-gradeuploader/logs/run_*.log | head -1)"
 ```
 

@@ -9,3 +9,4 @@ node_modules/
 ekape_download.log
 upload-api/
 .claude/settings.local.json
+docs/

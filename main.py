@@ -52,12 +52,17 @@ def report_log(target_date, status, download_count, upload_count, error_message,
         "finished_at": finished_at.isoformat(),
     }
 
+    full_url = f"{api_url}/api/grade-upload-logs"
+    logger.info(f"[logs] 호출 시작: {full_url}")
     try:
-        resp = requests.post(f"{api_url}/api/grade-upload-logs", json=payload, headers=headers, timeout=10)
-        resp.raise_for_status()
-        logger.info(f"로그 전송 완료: {resp.json()}")
+        resp = requests.post(full_url, json=payload, headers=headers, timeout=10)
+        body_preview = (resp.text or "")[:300]
+        if resp.ok:
+            logger.info(f"[logs] 호출 완료 HTTP {resp.status_code}: {body_preview}")
+        else:
+            logger.warning(f"[logs] 호출 실패 HTTP {resp.status_code}: {body_preview}")
     except Exception as e:
-        logger.warning(f"로그 전송 실패 (메인 작업 영향 없음): {e}")
+        logger.warning(f"[logs] 네트워크 오류 (swallow): {e}")
 
 
 def notify_failure(target_date, error_message, started_at, finished_at, download_count, upload_count):
@@ -89,12 +94,30 @@ def notify_failure(target_date, error_message, started_at, finished_at, download
         },
     }
 
+    logger.info(f"[alerts] 호출 시작: {url}")
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=10)
-        resp.raise_for_status()
-        logger.info(f"[alerts] 호출 완료: {resp.json()}")
+        body_preview = (resp.text or "")[:300]
+        logger.info(f"[alerts] 응답 HTTP {resp.status_code}: {body_preview}")
+
+        # webapp agent 인계 사양에 따른 진단 힌트 (운영자 즉시 판별용)
+        if resp.status_code == 401:
+            logger.warning("[alerts] 401 → VM .env FSSWEBAPP_ALERTS_KEY 점검 필요")
+        elif resp.status_code == 503:
+            logger.warning("[alerts] 503 → webapp App Service env API_KEY_ALERTS 미등록 (fail-closed). webapp 운영자에 통보")
+        elif resp.status_code == 502:
+            logger.warning("[alerts] 502 → webapp 메일 발송 단계 실패 (DB는 적재됐을 수 있음). webapp 로그/SMTP 확인")
+        elif resp.ok:
+            try:
+                data = resp.json()
+                if data.get("status") == "suppressed":
+                    logger.info(f"[alerts] 디바운스 적용: due_to={data.get('suppressed_due_to')}")
+                elif data.get("status") == "sent":
+                    logger.info(f"[alerts] 메일 발송됨: alert_id={data.get('alert_id')}, recipients={data.get('recipients_count')}")
+            except Exception:
+                pass
     except Exception as e:
-        logger.warning(f"[alerts] 호출 실패 (swallow): {e}")
+        logger.warning(f"[alerts] 네트워크 오류 (swallow): {e}")
 
 
 def main():

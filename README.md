@@ -12,6 +12,7 @@ Azure Data Lake Storage(ADLS)에 업로드하는 자동화 도구입니다.
 4. 각 행의 등급판정결과 엑셀 다운로드 (기계판정 제외)
 5. 다운로드된 엑셀 파일을 ADLS에 업로드
 6. 실행 결과 로그를 fss-webapp API로 전송
+7. **(자동 소급)** 실패 누적 날짜를 `state/failed_dates.json`에서 읽어 retry. 7일 경과분은 자동 포기.
 
 ## 실행 환경
 
@@ -23,12 +24,14 @@ Azure Data Lake Storage(ADLS)에 업로드하는 자동화 도구입니다.
 
 ```
 fss-gradeuploader/
-├── main.py                # 메인 실행 (다운로드 → 업로드 → 로그 전송)
+├── main.py                # 메인 실행 (다운로드 → 업로드 → 로그 전송 → 실패 소급)
 ├── download_grades.py     # 축산물원패스 다운로드 로직
 ├── upload_grades.py       # ADLS 업로드 로직
+├── failed_dates.py        # 실패 날짜 추적 (record/clear/pending_for_retry)
 ├── .env                   # 환경변수 (로그인 정보, ADLS, API 설정)
 ├── requirements.txt       # Python 패키지 목록
 ├── downloads/             # 다운로드된 엑셀 파일 (날짜별)
+├── state/                 # 런타임 상태 (failed_dates.json — 자동 생성, gitignore)
 └── logs/                  # 실행 로그
 ```
 
@@ -77,10 +80,12 @@ source venv/bin/activate
 python3 main.py
 ```
 
-특정 날짜 지정:
+특정 날짜 지정 (수동 백필):
 ```bash
 TARGET_DATE=2026-03-28 python3 main.py
 ```
+> 셸 env로 `TARGET_DATE`를 주입하면 그 날짜 1회만 처리하고 자동 소급 백필은 **스킵**됩니다 (특정 날짜만 돌고 싶을 때 간섭 안 하게).
+> cron 평상 실행 (`TARGET_DATE` 미설정)에서는 어제분 처리 후 `state/failed_dates.json`의 누적 실패를 자동 retry합니다.
 
 ### cron 스케줄 확인/수정
 

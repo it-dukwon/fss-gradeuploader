@@ -3,6 +3,7 @@ FSS Grade Uploader - Main orchestrator
 1. Download grade results from ekape.or.kr
 2. Upload Excel files directly to ADLS
 3. Report execution log to fss-webapp API
+4. (자동) 실패 누적 날짜를 state/failed_dates.json에서 읽어 소급 재시도
 """
 
 import os
@@ -12,6 +13,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import requests
+
+import failed_dates
 
 # Setup logging
 log_dir = Path("logs")
@@ -120,21 +123,24 @@ def notify_failure(target_date, error_message, started_at, finished_at, download
         logger.warning(f"[alerts] 네트워크 오류 (swallow): {e}")
 
 
-def main():
-    from dotenv import load_dotenv
-    load_dotenv()
+def process_target_date(target_date):
+    """단일 target_date에 대해 다운로드+업로드+webapp 보고+상태파일 갱신을 1회 수행.
+
+    - target_date를 환경변수로 주입 (download_grades.get_target_date_str()이 읽음).
+    - status=='fail'이면 failed_dates에 record, 그 외 (success/partial)는 clear.
+    """
+    os.environ["TARGET_DATE"] = target_date
 
     started_at = datetime.now(KST)
 
     logger.info("=" * 60)
-    logger.info("FSS Grade Uploader 시작")
+    logger.info(f"FSS Grade Uploader 실행 (target_date={target_date})")
     logger.info("=" * 60)
 
     status = "success"
     download_count = 0
     upload_count = 0
     error_message = None
-    target_date = None
 
     # Step 1: Download grade results from ekape
     logger.info("[Step 1] 축산물원패스 등급판정결과 다운로드")
@@ -142,8 +148,7 @@ def main():
     download_status = None
     download_error = None
     try:
-        from download_grades import run_download, get_target_date_str, STATUS_OK, STATUS_NO_DATA
-        target_date = get_target_date_str()
+        from download_grades import run_download, STATUS_OK, STATUS_NO_DATA
         result = run_download()
         downloaded_files = result["files"]
         download_status = result["status"]
@@ -171,7 +176,10 @@ def main():
         report_log(target_date, status, download_count, upload_count, error_message, started_at, finished_at)
         if status == "fail":
             notify_failure(target_date, error_message, started_at, finished_at, download_count, upload_count)
-        return
+            failed_dates.record(target_date, error_message)
+        else:
+            failed_dates.clear(target_date)
+        return status
 
     logger.info(f"다운로드 완료: {len(downloaded_files)}개 파일")
 
@@ -207,6 +215,43 @@ def main():
     report_log(target_date, status, download_count, upload_count, error_message, started_at, finished_at)
     if status == "fail":
         notify_failure(target_date, error_message, started_at, finished_at, download_count, upload_count)
+        failed_dates.record(target_date, error_message)
+    else:
+        failed_dates.clear(target_date)
+
+    return status
+
+
+def main():
+    # .env 로드 전에 외부 주입 여부 먼저 캡처 (수동 백필 판별 — .env의 TARGET_DATE는 무시)
+    is_manual_run = bool(os.environ.get("TARGET_DATE", "").strip())
+
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    from download_grades import get_target_date_str
+    today_target = get_target_date_str()
+
+    process_target_date(today_target)
+
+    if is_manual_run:
+        logger.info("[main] TARGET_DATE 수동 지정 — 자동 백필 스킵")
+        return
+
+    pending = failed_dates.pending_for_retry(today_target)
+    if not pending:
+        logger.info("[main] 소급 재시도 대상 없음")
+        return
+
+    logger.info(f"[main] 소급 재시도 대상 {len(pending)}일: {pending}")
+    for d in pending:
+        try:
+            process_target_date(d)
+        except Exception as e:
+            # 한 날짜 실패가 다음 날짜를 막지 않도록 swallow
+            logger.error(f"[main] 백필 처리 중 예외 ({d}): {e}")
+
+    os.environ.pop("TARGET_DATE", None)
 
 
 if __name__ == "__main__":

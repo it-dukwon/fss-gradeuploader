@@ -3,6 +3,7 @@ venv/
 downloads/
 logs/
 uploads/
+state/
 __pycache__/
 *.pyc
 node_modules/

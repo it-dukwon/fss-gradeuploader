@@ -14,6 +14,14 @@ Azure Data Lake Storage(ADLS)에 업로드하는 자동화 도구입니다.
 6. 실행 결과 로그를 fss-webapp API로 전송
 7. **(자동 소급)** 실패 누적 날짜를 `state/failed_dates.json`에서 읽어 retry. 7일 경과분은 자동 포기.
 
+### 재시도 동작 (2단계)
+
+- **잡 단위 재시도**: 다운로드/업로드가 일시적 실패(타임아웃·메뉴이동·조회·업로드 오류)면 **5분 간격으로 최대 2회 재시도**(총 3회 시도). `no_data`(0건)·`partial`(일부 업로드)·`config_missing`(계정 누락)은 재시도하지 않음. 간격/횟수는 `.env`의 `RETRY_INTERVAL_SEC`/`RETRY_MAX`로 조정.
+- **일 단위 소급**: 그래도 실패하면 다음날 자동 재시도(위 7번, 최대 7일).
+- **로그 표기**: webapp 로그의 `error_message`에 시도 정보를 함께 보냄. 성공이어도 중간 실패가 있었으면 `(참고) N회 시도 중 M회 실패 후 성공...`으로 남고, 최종 실패는 `[N회 시도 모두 실패] ...`로 기록됨. **성공/실패 판정은 `status` 필드 기준** (error_message 존재 여부로 판단 금지).
+
+> 로그인 페이지 진입은 `domcontentloaded` 기준으로 대기함. (과거 `networkidle`은 Nexacro 백그라운드 통신 때문에 간헐적으로 60초 내 idle에 도달 못 해 타임아웃 발생 → 2026-05-30/06-07 실패. 폐기.)
+
 ## 실행 환경
 
 - **운영 서버**: Azure VM (`fss-gradeuploader`, Ubuntu)
@@ -60,6 +68,10 @@ AZURE_STORAGE_CONTAINER=컨테이너명
 
 # headless 모드 (VM에서는 true 필수)
 CI=true
+
+# 잡 단위 재시도 (선택 — 미설정 시 기본 5분 간격 2회). VM 가동창(07:55~08:30) 안에 끝나야 함
+RETRY_INTERVAL_SEC=300
+RETRY_MAX=2
 
 # 실행 로그 전송 (설정된 환경에만 전송, 없으면 건너뜀)
 FSS_WEBAPP_API_URL=https://webapp-databricks-dashboard-xxx.azurewebsites.net
@@ -126,9 +138,13 @@ ls ~/fss-gradeuploader/downloads/
 
 ## 문제 해결
 
-### VM에서 로그인 타임아웃
-- `.env`의 `EKAPE_ID`/`EKAPE_PW` 확인
-- `curl -I https://www.ekape.or.kr`로 네트워크 확인
+### VM에서 로그인 타임아웃 (`Page.goto: Timeout ...`)
+- 잡 단위 재시도(5분×2)가 자동으로 한 번 더 시도하므로 일시적 지연은 자체 복구됨. 로그에서 `[시도 n/3]` 확인.
+- 계속 실패 시: `.env`의 `EKAPE_ID`/`EKAPE_PW` 확인, `curl -I https://www.ekape.or.kr`로 네트워크 확인.
+- 지금도 재현되는지 단독 점검:
+  ```bash
+  python3 -c "from playwright.sync_api import sync_playwright as S;pg=S().start().chromium.launch(headless=True).new_context().new_page();pg.goto('https://www.ekape.or.kr/kapecp/ui/kapecp/fastLogin.jsp',wait_until='domcontentloaded',timeout=60000);print('OK')"
+  ```
 
 ### venv 꼬임 (deactivate 후 재생성)
 ```bash

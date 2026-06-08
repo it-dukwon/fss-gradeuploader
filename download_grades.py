@@ -133,7 +133,10 @@ def resolve_ekape_credentials():
 def login_ekape(page, ekape_id, ekape_pw):
     """축산물원패스 로그인 (거래증명통합) - fastLogin.jsp 사용"""
     logger.info("축산물원패스 로그인 시작...")
-    page.goto(EKAPE_LOGIN_URL, wait_until="networkidle", timeout=60000)
+    # networkidle은 Nexacro의 keep-alive/백그라운드 요청 때문에 간헐적으로 60s 내 idle에
+    # 도달하지 못해 goto 타임아웃이 났다(2026-05-30, 06-07 실패). 문서만 뜨면 충분하므로
+    # domcontentloaded로 전환한다. 일시적 지연 대비 재시도는 main.py의 잡 단위(5분 간격)에서 처리.
+    page.goto(EKAPE_LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
     time.sleep(3)
 
     try:

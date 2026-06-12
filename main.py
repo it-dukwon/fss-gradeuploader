@@ -132,6 +132,69 @@ def notify_failure(target_date, error_message, started_at, finished_at, download
         logger.warning(f"[alerts] 네트워크 오류 (swallow): {e}")
 
 
+def report_court_progress(snapshot):
+    """사건 진행현황 스냅샷 1건을 fss-webapp로 전송.
+
+    변동감지/알람은 webapp 책임. 여기서는 '현재 스냅샷'만 push한다.
+    호출 실패는 swallow (다른 사건/메인 잡에 영향 없음).
+    """
+    api_url = os.getenv("FSS_WEBAPP_API_URL", "").rstrip("/")
+    if not api_url:
+        logger.warning("FSS_WEBAPP_API_URL 미설정 — 사건 진행현황 전송 skip")
+        return False
+
+    api_key = os.getenv("FSS_WEBAPP_API_KEY", "").strip()
+    headers = {"x-api-key": api_key} if api_key else {}
+    path = os.getenv("COURT_PROGRESS_API_PATH", "/api/court-case-progress")
+
+    payload = {"job_name": "court-case-crawler", **snapshot}
+    full_url = f"{api_url}{path}"
+    try:
+        resp = requests.post(full_url, json=payload, headers=headers, timeout=15)
+        body_preview = (resp.text or "")[:200]
+        if resp.ok:
+            logger.info(f"[court] 전송 OK HTTP {resp.status_code} "
+                        f"({snapshot.get('case_no')}): {body_preview}")
+            return True
+        logger.warning(f"[court] 전송 실패 HTTP {resp.status_code} "
+                       f"({snapshot.get('case_no')}): {body_preview}")
+    except Exception as e:
+        logger.warning(f"[court] 네트워크 오류 (swallow): {e}")
+    return False
+
+
+def run_court_crawl():
+    """대법원 나의사건검색 진행현황 수집 → 사건별 fss-webapp 전송.
+
+    ekape 잡과 동일 실행/주기. 설정(COURT-CASES) 없으면 조용히 skip.
+    """
+    logger.info("=" * 60)
+    logger.info("[Court] 대법원 나의사건검색 진행현황 수집")
+    try:
+        from court_case_search import run_crawl, STATUS_CONFIG_MISSING
+    except Exception as e:
+        logger.warning(f"[court] 모듈 로드 실패 — skip: {e}")
+        return
+
+    try:
+        out = run_crawl()
+    except Exception as e:
+        logger.error(f"[court] 수집 중 예외: {e}")
+        return
+
+    if out["status"] == STATUS_CONFIG_MISSING:
+        logger.info(f"[court] 미설정/설정오류 — skip: {out['error']}")
+        return
+
+    results = out.get("results", [])
+    logger.info(f"[court] 수집 {len(results)}건 (overall={out['status']})")
+    sent = 0
+    for snap in results:
+        if report_court_progress(snap):
+            sent += 1
+    logger.info(f"[court] webapp 전송 {sent}/{len(results)}건 완료")
+
+
 def _run_once(target_date):
     """단일 target_date에 대해 다운로드+업로드를 1회 시도.
 
@@ -292,6 +355,12 @@ def main():
     today_target = get_target_date_str()
 
     process_target_date(today_target)
+
+    # 대법원 나의사건검색 진행현황 수집 (ekape와 동일 주기, 독립 실패 격리)
+    try:
+        run_court_crawl()
+    except Exception as e:
+        logger.error(f"[main] 사건검색 수집 중 예외 (swallow): {e}")
 
     if is_manual_run:
         logger.info("[main] TARGET_DATE 수동 지정 — 자동 백필 스킵")

@@ -12,7 +12,8 @@ Azure Data Lake Storage(ADLS)에 업로드하는 자동화 도구입니다.
 4. 각 행의 등급판정결과 엑셀 다운로드 (기계판정 제외)
 5. 다운로드된 엑셀 파일을 ADLS에 업로드
 6. 실행 결과 로그를 fss-webapp API로 전송
-7. **(자동 소급)** 실패 누적 날짜를 `state/failed_dates.json`에서 읽어 retry. 7일 경과분은 자동 포기.
+7. **(대법원 사건검색)** 지정 사건들의 진행현황 수집 후 fss-webapp 전송 (아래 별도 섹션)
+8. **(자동 소급)** 실패 누적 날짜를 `state/failed_dates.json`에서 읽어 retry. 7일 경과분은 자동 포기.
 
 ### 재시도 동작 (2단계)
 
@@ -32,9 +33,10 @@ Azure Data Lake Storage(ADLS)에 업로드하는 자동화 도구입니다.
 
 ```
 fss-gradeuploader/
-├── main.py                # 메인 실행 (다운로드 → 업로드 → 로그 전송 → 실패 소급)
+├── main.py                # 메인 실행 (다운로드 → 업로드 → 로그 전송 → 사건검색 → 실패 소급)
 ├── download_grades.py     # 축산물원패스 다운로드 로직
 ├── upload_grades.py       # ADLS 업로드 로직
+├── court_case_search.py   # 대법원 나의사건검색 진행현황 수집 (캡차 OCR)
 ├── failed_dates.py        # 실패 날짜 추적 (record/clear/pending_for_retry)
 ├── .env                   # 환경변수 (로그인 정보, ADLS, API 설정)
 ├── requirements.txt       # Python 패키지 목록
@@ -42,6 +44,61 @@ fss-gradeuploader/
 ├── state/                 # 런타임 상태 (failed_dates.json — 자동 생성, gitignore)
 └── logs/                  # 실행 로그
 ```
+
+## 대법원 나의사건검색 (사건 진행현황 수집)
+
+ekape 등급판정 다운로드와 **동일 실행/동일 cron**으로, 대법원 나의사건검색(`ssgo.scourt.go.kr`)에서
+지정한 사건들의 진행현황을 수집해 fss-webapp으로 전송한다. (`main.py` → `run_court_crawl()`)
+
+**동작**
+1. Key Vault에서 사건목록(`COURT-CASES`)과 Anthropic 키(`ANTHROPIC-API-KEY`) 로드 — 없으면 조용히 skip
+2. 사건별: 법원/년도/사건구분/일련번호/당사자명 입력
+3. 자동입력 방지문자(캡차, 6자리 숫자)를 **Anthropic vision으로 OCR** (실패 시 새로고침 후 재시도, 최대 `CAPTCHA_MAX_TRY`회)
+4. 진행내용 탭 → **송달결과 '확인' 체크박스 ON**(이걸 켜야 결과 칸에 'O시 도달' 등 송달결과가 표시됨) → 일자별 진행사항/메타/기일 파싱
+5. 사건별 스냅샷을 fss-webapp API로 전송. **변동감지·알람은 webapp 책임** (크롤러는 diff 안 함)
+
+> 캡차 OCR은 LLM 호출 1회/시도. 사건 수 × 시도 횟수만큼 Anthropic 비용 발생.
+
+### Key Vault 항목 (사건검색용)
+
+| 시크릿명 | 내용 |
+|---|---|
+| `COURT-CASES` | 추적 사건 목록 (JSON 배열). webapp이 set/update |
+| `ANTHROPIC-API-KEY` | 캡차 OCR용 Anthropic API 키 |
+
+`COURT-CASES` 스키마 (배열 각 원소):
+```json
+[
+  { "court": "대전고등법원", "caseNo": "2025나1073", "party": "덕원농장영농조합법인",
+    "id": "case-001", "alias": "물품대금 항소심", "enabled": true }
+]
+```
+- 필수: `court`(법원 전체명), `caseNo`(예: `2025나1073`), `party`(당사자명, 본인확인용)
+- 선택: `id`(webapp CRUD 키), `alias`(메모), `enabled`(false면 수집 제외)
+- `caseNo`는 크롤러가 `^(\d{4})(\D+)(\d+)$`로 년도/사건구분부호/일련번호로 분해
+
+### webapp 전송 계약 (별도 세션에서 webapp 구현 시 참조)
+
+- `POST {FSS_WEBAPP_API_URL}{COURT_PROGRESS_API_PATH}` (기본 `/api/court-case-progress`)
+- 헤더: `x-api-key: {FSS_WEBAPP_API_KEY}`
+- **사건 1건당 1회 POST.** 바디(스냅샷):
+```json
+{
+  "job_name": "court-case-crawler",
+  "case_id": "case-001",
+  "court": "대전고등법원", "case_no": "2025나1073", "party": "덕원농장영농조합법인",
+  "status": "success",
+  "case_name": "[전자]물품대금", "court_dept": "제2민사부(가)...",
+  "received_date": "2025-11-06", "final_result": "",
+  "progress": [ { "date": "2025-11-10", "content": "...송달", "result": "2025.11.12 도달", "notice": "" } ],
+  "hearings": [ { "date": "2026-07-09", "time": "15:30", "type": "변론기일", "location": "제304호 법정", "result": "" } ],
+  "crawled_at": "2026-06-12T08:00:00+09:00",
+  "error_message": null
+}
+```
+- `status`: `success` | `not_found`(사건/당사자 불일치) | `captcha_failed` | `config_missing` | `error`
+- **webapp 책임**: `case_no`(+`court`) 기준으로 직전 스냅샷과 `progress` 비교 → 신규 행 생기면 알람 발송. 크롤러는 매 실행 전체 스냅샷만 push.
+- 당사자/대리인 이름은 사이트가 일부 마스킹(`주OOOO`)해서 내려줌 — 정상.
 
 ## Azure VM 초기 설정
 
@@ -68,6 +125,14 @@ AZURE_STORAGE_CONTAINER=컨테이너명
 
 # headless 모드 (VM에서는 true 필수)
 CI=true
+
+# 대법원 나의사건검색 (선택 — KEY_VAULT_URL 있으면 KV에서 COURT-CASES/ANTHROPIC-API-KEY 로드)
+# 로컬 테스트 시 env fallback:
+#   ANTHROPIC_API_KEY=sk-ant-...
+#   COURT_CASES=[{"court":"대전고등법원","caseNo":"2025나1073","party":"덕원농장영농조합법인"}]
+CAPTCHA_OCR_MODEL=claude-sonnet-4-6   # 캡차 OCR 모델 (기본값)
+CAPTCHA_MAX_TRY=4                     # 캡차 재시도 횟수
+COURT_PROGRESS_API_PATH=/api/court-case-progress   # webapp 전송 경로
 
 # 잡 단위 재시도 (선택 — 미설정 시 기본 5분 간격 2회). VM 가동창(07:55~08:30) 안에 끝나야 함
 RETRY_INTERVAL_SEC=300

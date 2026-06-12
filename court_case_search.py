@@ -47,10 +47,19 @@ def _kv_client():
 
 
 def resolve_anthropic_key():
-    """Anthropic API 키: KEY_VAULT_URL 있으면 KV, 없으면 env.
+    """Anthropic API 키: env 우선 → 없으면 Key Vault.
+
+    이 키는 다른 앱이 쓸 일이 없는 정적 시크릿이라 VM .env 직접 보관으로 충분.
+    (COURT-CASES와 달리 webapp이 써넣을 필요가 없음.) env 미설정 시에만 KV 조회.
 
     Returns: (key, error)
     """
+    # .env에 하이픈/언더스코어 둘 다 허용 (SDK 기본은 ANTHROPIC_API_KEY)
+    key = (os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC-API-KEY") or "").strip()
+    if key:
+        logger.info("Anthropic 키 로드: 환경변수")
+        return key, None
+
     vault_url = os.getenv("KEY_VAULT_URL", "").strip()
     if vault_url:
         try:
@@ -60,12 +69,7 @@ def resolve_anthropic_key():
             return key, None
         except Exception as e:
             return None, f"Key Vault에서 Anthropic 키 조회 실패: {e}"
-    # env fallback (.env에 하이픈/언더스코어 둘 다 허용)
-    key = (os.getenv("ANTHROPIC-API-KEY") or os.getenv("ANTHROPIC_API_KEY") or "").strip()
-    if key:
-        logger.info("Anthropic 키 로드: 환경변수")
-        return key, None
-    return None, "Anthropic 키가 없습니다 (KEY_VAULT_URL 또는 ANTHROPIC_API_KEY)."
+    return None, "Anthropic 키가 없습니다 (env ANTHROPIC_API_KEY 또는 KV ANTHROPIC-API-KEY)."
 
 
 def resolve_court_cases():

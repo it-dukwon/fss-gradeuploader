@@ -7,7 +7,7 @@
 import os
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
@@ -43,14 +43,36 @@ NEXACRO_LOGIN_BTN = 'div[id$="btnLogin"]'
 NEXACRO_TRADE_TAB = 'div[id$="btnLoginType01"]'
 
 
+# 실행 환경이 UTC(컨테이너)여도 항상 KST 기준으로 대상일을 판단한다.
+KST = timezone(timedelta(hours=9))
+
+# 대상일 결정 컷오프(KST 시). 이 시각 '이전' 실행은 어제, '이후'는 오늘로 본다.
+# 하루 3회(08/18/22 KST) 기준: 08시(새벽) → 어제 도축분, 18·22시(저녁) → 당일 도축분.
+TARGET_DATE_CUTOFF_HOUR = int(os.getenv("TARGET_DATE_CUTOFF_HOUR", "12"))
+
+
 def get_target_date_str():
-    """대상 날짜를 반환 (TARGET_DATE 환경변수 우선, 없으면 어제)"""
+    """대상 날짜를 반환.
+
+    - TARGET_DATE 환경변수가 있으면 그대로 사용 (수동 백필).
+    - 없으면 KST 현재 시각 기준으로 판단:
+        컷오프 시각(기본 12시) 이전 실행 → 어제, 이후 → 오늘.
+    """
     target = os.getenv("TARGET_DATE", "").strip()
     if target:
         logger.info(f"TARGET_DATE 환경변수 사용: {target}")
         return target
-    yesterday = datetime.now() - timedelta(days=1)
-    return yesterday.strftime("%Y-%m-%d")
+    now_kst = datetime.now(KST)
+    if now_kst.hour < TARGET_DATE_CUTOFF_HOUR:
+        d = now_kst - timedelta(days=1)
+        when = "어제"
+    else:
+        d = now_kst
+        when = "오늘"
+    date_str = d.strftime("%Y-%m-%d")
+    logger.info(f"대상일 산정: KST {now_kst:%Y-%m-%d %H:%M} "
+                f"(컷오프 {TARGET_DATE_CUTOFF_HOUR}시) → {when}({date_str})")
+    return date_str
 
 
 def ensure_download_dir():

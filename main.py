@@ -344,23 +344,28 @@ def process_target_date(target_date):
     return status
 
 
-def main():
-    # .env 로드 전에 외부 주입 여부 먼저 캡처 (수동 백필 판별 — .env의 TARGET_DATE는 무시)
-    is_manual_run = bool(os.environ.get("TARGET_DATE", "").strip())
+def _resolve_crawl_only():
+    """실행 대상을 결정: 'ekape' | 'court' | 'all'.
 
-    from dotenv import load_dotenv
-    load_dotenv()
+    우선순위: 명령행 `--only=ekape|court` > 환경변수 `CRAWL_ONLY` > 기본 'all'.
+    (Container Apps Job은 잡별로 CRAWL_ONLY env를 다르게 주는 방식으로 분리한다.)
+    """
+    val = os.getenv("CRAWL_ONLY", "").strip().lower()
+    for a in sys.argv[1:]:
+        if a.startswith("--only="):
+            val = a.split("=", 1)[1].strip().lower()
+    return val if val in ("ekape", "court") else "all"
 
+
+def run_ekape(is_manual_run):
+    """축평원 등급 다운로드/업로드 + 실패 소급 백필.
+
+    is_manual_run(TARGET_DATE 수동지정)이면 해당 날짜만 처리하고 자동 백필은 스킵.
+    """
     from download_grades import get_target_date_str
     today_target = get_target_date_str()
 
     process_target_date(today_target)
-
-    # 대법원 나의사건검색 진행현황 수집 (ekape와 동일 주기, 독립 실패 격리)
-    try:
-        run_court_crawl()
-    except Exception as e:
-        logger.error(f"[main] 사건검색 수집 중 예외 (swallow): {e}")
 
     if is_manual_run:
         logger.info("[main] TARGET_DATE 수동 지정 — 자동 백필 스킵")
@@ -380,6 +385,28 @@ def main():
             logger.error(f"[main] 백필 처리 중 예외 ({d}): {e}")
 
     os.environ.pop("TARGET_DATE", None)
+
+
+def main():
+    # .env 로드 전에 외부 주입 여부 먼저 캡처 (수동 백필 판별 — .env의 TARGET_DATE는 무시)
+    is_manual_run = bool(os.environ.get("TARGET_DATE", "").strip())
+
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    only = _resolve_crawl_only()
+    logger.info(f"[main] 실행 대상(CRAWL_ONLY): {only}")
+
+    # 축평원 등급 다운로드/업로드 (+ 소급 백필)
+    if only in ("all", "ekape"):
+        run_ekape(is_manual_run)
+
+    # 대법원 나의사건검색 진행현황 수집 (독립 실패 격리)
+    if only in ("all", "court"):
+        try:
+            run_court_crawl()
+        except Exception as e:
+            logger.error(f"[main] 사건검색 수집 중 예외 (swallow): {e}")
 
 
 if __name__ == "__main__":

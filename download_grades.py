@@ -410,7 +410,14 @@ def run_download():
         force_headless = os.getenv("HEADLESS", "false").lower() == "true"
         browser = p.chromium.launch(
             headless=force_headless,
-            args=["--window-size=1920,1080", "--start-maximized"],
+            # 컨테이너(root)에서 headed 크로미움 기동 필수 플래그.
+            # 미지정 시 sandbox 초기화/공유메모리(/dev/shm) 문제로 launch 단계에서 hang/크래시.
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--window-size=1920,1080",
+                "--start-maximized",
+            ],
         )
         context = browser.new_context(
             viewport={"width": 1920, "height": 1080},

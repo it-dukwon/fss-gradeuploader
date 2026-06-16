@@ -388,6 +388,9 @@ def run_ekape(is_manual_run):
 
 
 def main():
+    # 컨테이너 기동 가시성: Python 진입 즉시 stdout 출력 (기동 hang vs 앱 hang 구분용)
+    print("[main] 컨테이너 진입 — main() 시작", flush=True)
+
     # .env 로드 전에 외부 주입 여부 먼저 캡처 (수동 백필 판별 — .env의 TARGET_DATE는 무시)
     is_manual_run = bool(os.environ.get("TARGET_DATE", "").strip())
 

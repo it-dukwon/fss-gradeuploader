@@ -5,7 +5,8 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    CI=true
+    CI=true \
+    DISPLAY=:99
 
 WORKDIR /app
 
@@ -22,5 +23,6 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY . .
 
-# xvfb-run 으로 가상 디스플레이 위에서 headed 크로미움 실행 (Nexacro 그리드 렌더 보장)
-CMD ["xvfb-run", "-a", "--server-args=-screen 0 1920x1080x24", "python", "main.py"]
+# 명시적 Xvfb(가상 디스플레이)를 백그라운드로 띄운 뒤 headed 크로미움 실행 (Nexacro 그리드 렌더 보장).
+# xvfb-run 래퍼는 컨테이너에서 기동 hang 소지가 있어, 명시적 Xvfb + DISPLAY(=:99, ENV)로 구동한다.
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 & sleep 1 && exec python -u main.py"]

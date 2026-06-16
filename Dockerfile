@@ -12,7 +12,7 @@ WORKDIR /app
 # Xvfb 가상 디스플레이 — EKAPE(Nexacro) 는 headless 크로미움에서 조회 그리드가 렌더되지 않아
 # headed 로 구동해야 한다. 컨테이너엔 디스플레이가 없으므로 xvfb 로 가상 디스플레이를 제공.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends xvfb \
+ && apt-get install -y --no-install-recommends xvfb xauth \
  && rm -rf /var/lib/apt/lists/*
 
 # 의존성 먼저 (레이어 캐시) → chromium + 시스템 라이브러리 설치

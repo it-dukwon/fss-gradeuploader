@@ -403,10 +403,14 @@ def run_download():
     logger.info(f"다운로드 경로: {download_path}")
 
     with sync_playwright() as p:
-        is_ci = os.getenv("CI", "false").lower() == "true"
+        # EKAPE 는 Nexacro 기반 — headless 크로미움에서는 조회 결과 그리드(다운로드 버튼)가
+        # 렌더되지 않아 항상 0건으로 잡힌다(2026-06-14 Container Apps 이관 후 회귀, 06-13 까진 VM headed 정상).
+        # 따라서 항상 headed 로 실행하고, 컨테이너에서는 Dockerfile 의 xvfb-run(가상 디스플레이)로 구동한다.
+        # HEADLESS=true 를 명시한 경우에만 headless (로컬 디버깅용 탈출구).
+        force_headless = os.getenv("HEADLESS", "false").lower() == "true"
         browser = p.chromium.launch(
-            headless=is_ci,
-            args=["--start-maximized"] if not is_ci else [],
+            headless=force_headless,
+            args=["--window-size=1920,1080", "--start-maximized"],
         )
         context = browser.new_context(
             viewport={"width": 1920, "height": 1080},

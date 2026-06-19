@@ -124,6 +124,14 @@ def resolve_ekape_credentials():
     Returns:
         (ekape_id, ekape_pw, error_message)
     """
+    # 1) 명시적 EKAPE_ID/EKAPE_PW 환경변수가 있으면 우선 사용 (로컬 개발/테스트).
+    #    운영 컨테이너는 이 값을 안 넣으므로 아래 Key Vault 경로로 떨어진다(동작 불변).
+    _eid = os.getenv("EKAPE_ID", "").strip()
+    _epw = os.getenv("EKAPE_PW", "").strip()
+    if _eid and _epw:
+        logger.info("계정정보 로드: 환경변수 (EKAPE_ID/EKAPE_PW)")
+        return _eid, _epw, None
+
     vault_url = os.getenv("KEY_VAULT_URL", "").strip()
     if vault_url:
         try:

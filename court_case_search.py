@@ -170,34 +170,51 @@ def ocr_captcha(png_bytes, api_key):
 
 # ===== 결과 페이지 파싱 =====
 
+# 송달결과 미확인 시 결과 칸에 들어오는 안내문구(placeholder). 실제값(예 "2026.05.22 도달")이 아님.
+DELIVERY_PLACEHOLDER_HINT = "항목 체크"  # "위의 '확인' 항목 체크"
+
+
+def _result_is_placeholder(s):
+    """송달 결과 칸이 '확인' 안내 placeholder 인지 판정."""
+    s = s or ""
+    return DELIVERY_PLACEHOLDER_HINT in s or ("확인" in s and "체크" in s)
+
+
 def _check_delivery_confirm(page):
-    """송달결과 '확인' 체크박스 ON (결과 칸이 'O시 도달' 등으로 채워짐)."""
-    boxes = page.evaluate(r"""() => {
-      const vis = el => { const r=el.getBoundingClientRect(); return r.width>0&&r.height>0; };
-      const out=[];
-      document.querySelectorAll('input[type=checkbox]').forEach(el=>{
-        if(!vis(el)) return;
-        let lab = el.getAttribute('aria-label')||el.getAttribute('title')||'';
-        if(el.id){ const l=document.querySelector('label[for="'+el.id+'"]'); if(l) lab=lab||l.innerText; }
-        out.push({id:el.id, label:(lab||'').trim(), checked:el.checked});
+    """송달결과 '확인' 체크박스를 모두 ON → 결과 칸이 실제값(예 'O시 도달')으로 채워지게 한다.
+
+    수정 이유(2026-06-19): 기존엔 (a) 체크박스 id 가 없으면 가드에서 아무것도 안 했고,
+    (b) page.check(=.checked 세팅)만으론 결과를 채우는 reveal 핸들러가 발화 안 됐다.
+    → id 의존 제거 + 보이는 unchecked 체크박스를 모두 '실제 click + change' 이벤트로 누르고,
+      결과 칸 placeholder 가 사라질 때까지 비동기 대기한다.
+    """
+    clicked = page.evaluate(r"""() => {
+      const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      let n = 0;
+      document.querySelectorAll('input[type=checkbox]').forEach(el => {
+        if (!vis(el) || el.checked) return;
+        try {
+          el.click();                                              // 실제 onclick 핸들러 발화
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          n++;
+        } catch (e) {}
       });
-      return out;
+      return n;
     }""")
-    target = None
-    for b in boxes:
-        if ("송달" in b["label"] or "확인" in b["label"]) and not b["checked"]:
-            target = b
-            break
-    if target is None:
-        target = next((b for b in boxes if not b["checked"]), None)
-    if target and target["id"]:
+    logger.info(f"송달결과 '확인' 체크박스 클릭: {clicked}개")
+    if clicked == 0:
+        logger.warning("송달결과 '확인' 체크박스를 찾지 못함 (이미 체크됐거나 없음)")
+        return False
+    # 결과 칸이 비동기로 채워짐 — placeholder 가 사라질 때까지 폴링(최대 ~12초)
+    for _ in range(24):
+        page.wait_for_timeout(500)
         try:
-            page.check(f'#{target["id"]}', force=True)
-            page.wait_for_timeout(1500)
-            return True
-        except Exception as e:
-            logger.warning(f"송달결과 확인 체크 실패: {e}")
-    return False
+            has_ph = page.evaluate("(h) => document.body.innerText.includes(h)", DELIVERY_PLACEHOLDER_HINT)
+        except Exception:
+            has_ph = False
+        if not has_ph:
+            break
+    return True
 
 
 def _grids(page):
@@ -224,15 +241,22 @@ def _extract_progress_rows(grids):
     if not best:
         return []
     out = []
+    ph_count = 0
     for r in best[1:]:
         if not r or not r[0]:
             continue
+        result = r[2] if len(r) > 2 else ""
+        if _result_is_placeholder(result):
+            ph_count += 1
+            result = ""  # placeholder 는 빈값으로 push (webapp 가 null 취급 → 오탐/덮어쓰기 방지)
         out.append({
             "date": _iso_date(r[0]),
             "content": r[1] if len(r) > 1 else "",
-            "result": r[2] if len(r) > 2 else "",
+            "result": result,
             "notice": r[3] if len(r) > 3 else "",
         })
+    if ph_count:
+        logger.warning(f"송달 '확인' 후에도 placeholder {ph_count}건 남음 — 빈값 처리(체크 미반영 의심, 재점검 필요)")
     return out
 
 

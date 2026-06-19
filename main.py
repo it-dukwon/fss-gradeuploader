@@ -354,7 +354,7 @@ def _resolve_crawl_only():
     for a in sys.argv[1:]:
         if a.startswith("--only="):
             val = a.split("=", 1)[1].strip().lower()
-    return val if val in ("ekape", "court") else "all"
+    return val if val in ("ekape", "court", "mainfarm") else "all"
 
 
 def run_ekape(is_manual_run):
@@ -399,6 +399,25 @@ def main():
 
     only = _resolve_crawl_only()
     logger.info(f"[main] 실행 대상(CRAWL_ONLY): {only}")
+
+    # 돼지도체(본장=덕원농장) 다운로드 — 독립 잡(download-only). ekape/court 와 배타적으로 실행.
+    # 양식이 위임현황과 달라 엑셀 처리는 webapp 책임(요건: WEBAPP_mainfarm_excel_요건.md).
+    if only == "mainfarm":
+        try:
+            from download_mainfarm import run_mainfarm_download
+            out = run_mainfarm_download()
+            files = out.get("files", [])
+            logger.info(f"[mainfarm] 다운로드 status={out['status']} files={len(files)} "
+                        f"기간={out.get('start')}~{out.get('end')}")
+            if files:
+                # mainfarm 전용 컨테이너로 업로드 (잡 env AZURE_STORAGE_CONTAINER=mainfarm-uploader).
+                # prod xls-uploader(위임현황 양식)와 반드시 분리 — 양식이 다르므로.
+                from upload_grades import run_upload
+                results = run_upload(files)
+                logger.info(f"[mainfarm] ADLS 업로드 {len(results)}/{len(files)}건")
+        except Exception as e:
+            logger.error(f"[main] 돼지도체(본장) 처리 중 예외 (swallow): {e}")
+        return
 
     # 축평원 등급 다운로드/업로드 (+ 소급 백필)
     if only in ("all", "ekape"):

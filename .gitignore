@@ -7,7 +7,7 @@ state/
 __pycache__/
 *.pyc
 node_modules/
-ekape_download.log
+*.log
 upload-api/
 .claude/settings.local.json
 docs/

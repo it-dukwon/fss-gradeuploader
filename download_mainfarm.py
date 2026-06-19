@@ -266,16 +266,20 @@ def _wait_popup_gone(page, timeout_s=6):
 
 
 def open_detail_popup_for_row(page, row_index):
-    """가상스크롤 행을 화면에 보이게 한 뒤, 그 행의 작업장(컬럼3) 셀을 '실제 DOM 클릭'해
-    상세팝업(CPCA201/202)을 viewport 안에 정상 오픈한다.
+    """가상스크롤 그리드에서 row_index 행을 화면에 띄우고, 그 행의 작업장(컬럼3) 셀을
+    '실제 DOM 클릭'해 상세팝업(CPCA201/202)을 viewport 안에 정상 오픈한다.
 
-    검증(교차검증 합의): synthetic oncellclick(plain evt) 호출은 팝업을 오프스크린에 띄워
-    btnExcel 클릭이 'outside of viewport'로 실패하고 다운로드도 안 잡힌다.
-    download_grades.py(261건 검증)와 동일하게 '실제 DOM 클릭' 정식 셀클릭 경로를 쓴다.
+    핵심(라이브 진단으로 확정):
+      - 결과그리드는 가상스크롤(렌더 band 약 22개 고정, 데이터만 이동).
+      - ds.set_rowposition(rowIdx) 으로 스크롤되지만 비동기 애니메이션이라 topRow API
+        (_getScreenTopRowPos)가 즉시엔 transient(잘못된) 값을 준다 → topRow 산수로 클릭하면
+        엉뚱한 행을 다운로드할 위험.
+      - 그래서 topRow 에 의존하지 않고, 정착 대기 후 '렌더된 band 중 (작업장 abattName +
+        판정일자 judgeDate)가 일치하는 band'(각 행이 유니크)를 찾아 그 셀을 클릭한다(자가교정).
     반환: 'ok' | 실패문자열.
     """
-    # 1) rowposition 세팅 + 행 렌더 + 화면행(screenRow) 역산
-    info = page.evaluate(
+    # 1) rowposition 세팅 → 그리드가 해당 행으로 스크롤
+    setres = page.evaluate(
         "(rowIdx) => {" + _FIND_WORKFORM_JS + """
             const wf = findWorkForm();
             if (!wf) return {err:'no-workform'};
@@ -283,38 +287,59 @@ def open_detail_popup_for_row(page, row_index):
             const ds = grd.getBindDataset();
             if (!ds || rowIdx >= ds.getRowCount()) return {err:'row-oob'};
             ds.set_rowposition(rowIdx);
-            try { if (grd.selectRow)  grd.selectRow(rowIdx); } catch (e) {}
-            try { if (grd.showRow)    grd.showRow(rowIdx); } catch (e) {}
             try { if (grd.setCellPos) grd.setCellPos(3); } catch (e) {}
-            let topRow = 0;
-            try {
-                if (grd.getTopRow) topRow = grd.getTopRow();
-                else if (grd.scrollbar && typeof grd.scrollbar.pos === 'number') topRow = grd.scrollbar.pos;
-            } catch (e) {}
-            return {ok:true, screenRow: rowIdx - topRow, topRow: topRow};
+            return {ok:true};
         }""",
         row_index,
     )
-    if not isinstance(info, dict) or not info.get("ok"):
-        return f"scroll-fail:{info}"
+    if not isinstance(setres, dict) or not setres.get("ok"):
+        return f"scroll-fail:{setres}"
 
-    time.sleep(0.4)  # 가상스크롤 렌더 대기
-    screen_row = info.get("screenRow", -1)
+    # 2) 정착 대기 후 (작업장+판정일자) 일치 band 탐색 → 그 셀 실제 클릭. 미정착 시 재시도.
+    find_js = "(rowIdx) => {" + _FIND_WORKFORM_JS + """
+        const wf = findWorkForm(); if (!wf) return {screenRow:-1, via:'no-wf'};
+        const grd = wf.grdGradeJudgeRst;
+        const ds = grd.getBindDataset();
+        const targetAbatt = String(ds.getColumn(rowIdx, 'abattName') || '');
+        const targetDate  = String(ds.getColumn(rowIdx, 'judgeDate') || '');
+        const dvars = [targetDate, targetDate.replace(/-/g,'.'), targetDate.replace(/-/g,'')];
+        function bandText(b) {
+            let t = '';
+            document.querySelectorAll('[id*="grdGradeJudgeRst.body"][id*="gridrow_'+b+'.cell_"]')
+                .forEach(c => { t += ' ' + (c.textContent || ''); });
+            return t;
+        }
+        function matches(b) {
+            const t = bandText(b);
+            if (!targetAbatt || t.indexOf(targetAbatt) < 0) return false;
+            return dvars.some(d => d && t.indexOf(d) >= 0);
+        }
+        let tp = 0;
+        try { const r = grd._getScreenTopRowPos ? grd._getScreenTopRowPos() : null;
+              if (Array.isArray(r)) tp = r[0]; else if (typeof r === 'number') tp = r; } catch (e) {}
+        const sr = rowIdx - tp;
+        if (sr >= 0 && matches(sr)) return {screenRow: sr, via:'calc', abatt:targetAbatt, date:targetDate};
+        const bands = new Set();
+        document.querySelectorAll('[id*="grdGradeJudgeRst.body"][id*="gridrow_"]')
+            .forEach(c => { const m = c.id.match(/gridrow_(\\d+)/); if (m) bands.add(parseInt(m[1])); });
+        for (const b of bands) { if (matches(b)) return {screenRow: b, via:'scan', abatt:targetAbatt, date:targetDate}; }
+        return {screenRow: -1, via:'none', abatt:targetAbatt, date:targetDate};
+    }"""
 
-    # 2) 화면행 + 컬럼3 셀 DOM 실제 클릭 (빌드별 id 패턴 대비 후보 시도)
     clicked = False
-    selectors = []
-    if isinstance(screen_row, int) and screen_row >= 0:
-        selectors = [
-            f'div[id*="grdGradeJudgeRst.body"][id*="cell_{screen_row}_3"]',
-            f'div[id*="grdGradeJudgeRst"][id*="cell_{screen_row}_3"]',
-        ]
-    for sel in selectors:
-        cell = page.query_selector(sel)
+    last = {}
+    for _ in range(4):
+        time.sleep(0.45)  # 스크롤 애니메이션 정착 대기
+        info = page.evaluate(find_js, row_index)
+        last = info if isinstance(info, dict) else {}
+        sr = last.get("screenRow", -1)
+        if not isinstance(sr, int) or sr < 0:
+            continue
+        cell = page.query_selector(f'div[id*="grdGradeJudgeRst.body"][id$="cell_{sr}_3"]')
         if not cell:
             continue
         try:
-            cell.scroll_into_view_if_needed(timeout=2000)
+            cell.scroll_into_view_if_needed(timeout=1500)
         except Exception:
             pass
         try:
@@ -324,11 +349,10 @@ def open_detail_popup_for_row(page, row_index):
         if not box or box["width"] <= 0 or box["height"] <= 0:
             continue
         try:
-            cell.click(timeout=4000)        # viewport 안 정식 클릭
+            cell.click(timeout=4000)
             clicked = True
             break
-        except Exception as e:
-            logger.warning(f"  행 {row_index} 셀 클릭 실패({sel}): {str(e)[:100]}")
+        except Exception:
             try:
                 page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
                 clicked = True
@@ -337,23 +361,8 @@ def open_detail_popup_for_row(page, row_index):
                 continue
 
     if not clicked:
-        # 진단(D-1 해소용): 실제 cell element id 패턴 샘플을 1회 덤프 → 셀렉터 확정 근거
-        try:
-            ids = page.evaluate(
-                """() => {
-                    const out = [];
-                    const els = document.querySelectorAll('div[id*="grdGradeJudgeRst"]');
-                    for (let i = 0; i < els.length && out.length < 25; i++) {
-                        const id = els[i].id || '';
-                        if (/cell/i.test(id)) out.push(id);
-                    }
-                    return out;
-                }"""
-            )
-            logger.warning(f"  행 {row_index} 셀 미클릭(screenRow={screen_row}). 후보 cell id 샘플: {ids}")
-        except Exception:
-            pass
-        return f"cell-dom-not-clickable(screenRow={screen_row})"
+        logger.warning(f"  행 {row_index} 셀 미클릭 (last={last})")
+        return f"cell-dom-not-clickable({last.get('via')})"
 
     # 3) 팝업 btnExcel DOM 가시화 대기
     for _ in range(50):  # ~10초
